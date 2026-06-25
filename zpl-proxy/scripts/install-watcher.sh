@@ -19,8 +19,8 @@
 set -euo pipefail
 
 # ── defaults ────────────────────────────────────────────────────────────────
-REPO_DIR="${ZPL_REPO_DIR:-$HOME/mcp-defender}"
-GIT_URL="${ZPL_GIT_URL:-https://github.com/lewtucker/MCP-Defender.git}"
+REPO_DIR="${ZPL_REPO_DIR:-$HOME/zpl-edge}"
+GIT_URL="${ZPL_GIT_URL:-https://github.com/lewtucker/zpl-edge.git}"
 LISTEN_HOST="127.0.0.1"
 LISTEN_PORT="8080"
 LABEL="net.lewtucker.zpl-watcher"     # macOS launchd label / Linux systemd unit name
@@ -51,28 +51,18 @@ done
 OS="$(uname -s)"
 say() { printf '\n\033[1m▶ %s\033[0m\n' "$*"; }
 
-# ── 1. repo (monorepo: zpl-proxy needs its sibling zpl-engine) ────────────────
+# ── 1. repo (zpl-edge: zpl-proxy + its sibling zpl-engine) ────────────────────
 say "Repo at $REPO_DIR"
 if [ -d "$REPO_DIR/.git" ]; then
   git -C "$REPO_DIR" pull --ff-only || echo "  (pull skipped — keeping current checkout)"
 elif [ -d "$REPO_DIR/zpl-proxy" ] && [ -d "$REPO_DIR/zpl-engine" ]; then
   echo "  (existing non-git tree — using as-is)"
 else
-  # Sparse checkout: pull ONLY the watcher (zpl-proxy) + its engine dep (zpl-engine),
-  # not the whole product. Falls back to a full shallow clone on older git (<2.27).
-  if git clone --no-checkout --depth 1 --filter=blob:none "$GIT_URL" "$REPO_DIR" 2>/dev/null \
-     && git -C "$REPO_DIR" sparse-checkout set zpl-proxy zpl-engine 2>/dev/null \
-     && git -C "$REPO_DIR" checkout 2>/dev/null; then
-    echo "  (sparse checkout: zpl-proxy + zpl-engine only)"
-  else
-    echo "  (sparse checkout unavailable — full shallow clone)"
-    rm -rf "$REPO_DIR"
-    git clone --depth 1 "$GIT_URL" "$REPO_DIR"
-  fi
+  git clone --depth 1 "$GIT_URL" "$REPO_DIR"   # the edge repo is just zpl-engine + zpl-proxy
 fi
 PROXY_DIR="$REPO_DIR/zpl-proxy"
 ENGINE_DIR="$REPO_DIR/zpl-engine"
-[ -d "$ENGINE_DIR" ] || { echo "ERROR: $ENGINE_DIR missing — need the monorepo (zpl-proxy depends on zpl-engine)" >&2; exit 1; }
+[ -d "$ENGINE_DIR" ] || { echo "ERROR: $ENGINE_DIR missing — need the zpl-edge repo (zpl-proxy depends on zpl-engine)" >&2; exit 1; }
 VENV="$PROXY_DIR/.venv"
 
 # ── 2. venv + install (engine FIRST so the app's dependency resolves) ─────────
