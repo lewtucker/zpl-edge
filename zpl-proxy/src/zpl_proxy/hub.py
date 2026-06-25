@@ -25,7 +25,7 @@ class WatcherHub:
     def __init__(self, hub_url: str, guard_token: str, aggregate, *,
                  listen: str = "", hostname: str = "", version: str = "0.1",
                  poll_interval: float = 5.0, autostart: bool = True,
-                 tail_source=None, stats_source=None) -> None:
+                 tail_source=None, stats_source=None, prune_source=None) -> None:
         base = hub_url.rstrip("/")
         self._register_url = base + "/api/watcher/register"
         self._commands_url = base + "/api/watcher/commands"
@@ -37,6 +37,7 @@ class WatcherHub:
         self._agg = aggregate
         self._tail_source = tail_source   # callable → list of recent event dicts
         self._stats_source = stats_source  # callable → local-store stats dict (heartbeat)
+        self._prune_source = prune_source  # callable(params) → prune local stores on command
         self._listen = listen
         self._hostname = hostname
         self._version = version
@@ -126,6 +127,8 @@ class WatcherHub:
                 self._fulfill_fetch(client, cmd)
             elif cmd.get("type") == "tail":
                 self._fulfill_tail(client, cmd)
+            elif cmd.get("type") == "prune" and self._prune_source:
+                self._prune_source(cmd.get("params") or {})   # admin-triggered local cleanup
 
     def _poll_bundle(self, client: httpx.Client) -> None:
         """Pull the guard's bound rule set + mode; recompile only on version change.

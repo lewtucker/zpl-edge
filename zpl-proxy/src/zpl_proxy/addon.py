@@ -118,6 +118,7 @@ class ZplLogger:
                 listen=listen, hostname=socket.gethostname(),
                 tail_source=lambda: list(self._tail),
                 stats_source=self.stats,
+                prune_source=self.prune_local,
             )
             log.info("watcher_hub_enabled", hub=self._config.hub_url)
 
@@ -341,6 +342,33 @@ class ZplLogger:
             tool=mcp_req.tool_name if mcp_req else None,
             status=flow.response.status_code if flow.response else None,
         )
+
+    def prune_local(self, params: dict | None = None) -> dict:
+        """Admin-triggered cleanup (via a hub 'prune' command): drop aggregate buckets
+        (older than params['days'], or all), empty the forensic JSONL, and remove the
+        legacy observations.db. Returns a small summary; never raises into the loop."""
+        params = params or {}
+        out: dict = {}
+        try:
+            if self._agg is not None:
+                if params.get("days"):
+                    cutoff = (datetime.now(timezone.utc)
+                              - timedelta(days=int(params["days"]))).isoformat()
+                else:
+                    cutoff = "9999-12-31T00:00:00"   # everything
+                out["agg_removed"] = self._agg.prune(cutoff)
+            if self._jsonl is not None:
+                self._jsonl.truncate()
+            legacy = self._config.data_dir / "observations.db"
+            if legacy.exists():
+                legacy.unlink()
+                out["legacy_db_removed"] = True
+            self._stats_cache = {}   # force fresh stats on next heartbeat
+            log.info("watcher_pruned", **out)
+        except Exception as exc:
+            out["error"] = str(exc)
+            log.warning("prune_failed", error=str(exc))
+        return out
 
     def stats(self) -> dict:
         """Local-store stats for the hub heartbeat (cached ~120s — the disk walk is cheap

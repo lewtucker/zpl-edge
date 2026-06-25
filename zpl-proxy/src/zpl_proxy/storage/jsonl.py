@@ -40,6 +40,21 @@ class JsonlWriter:
             self._f.write(line)
             self._f.flush()
 
+    def truncate(self) -> None:
+        """Empty the forensic log and drop its rotated backups (on prune). Frees the
+        space immediately — truncates the open fd rather than unlinking it."""
+        with self._lock:
+            self._f.seek(0)
+            self._f.truncate()
+            self._f.flush()
+        for i in range(1, self._backups + 1):
+            b = self._path.with_suffix(self._path.suffix + f".{i}")
+            if b.exists():
+                try:
+                    b.unlink()
+                except OSError:
+                    pass
+
     def close(self) -> None:
         with self._lock:
             self._f.close()
