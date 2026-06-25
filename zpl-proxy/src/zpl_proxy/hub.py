@@ -165,6 +165,7 @@ class WatcherHub:
             "status": r["sample_status"], "count": r["count"],
             "query_keys": r["query_keys"], "first_seen": r["first_seen"],
             "last_seen": r["last_seen"], "ts": r["last_seen"],
+            "agent": r.get("agent") or "",   # per-agent attribution (multi-agent watcher)
         } for r in rows]
         resp = client.post(self._logs_url, headers=self._headers,
                            json={"command_id": cmd.get("id"), "records": records})

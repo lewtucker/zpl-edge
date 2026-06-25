@@ -68,9 +68,16 @@ class EgressAggregate:
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.Lock()
         with self._lock:
+            # Multi-agent: `agent` is part of the dedup key so per-agent traffic stays
+            # distinct. Older dbs lack the column — drop the derived cache and rebuild it
+            # under the new schema (raw requests.jsonl is untouched; only aggregates reset).
+            cols = [r[1] for r in self._conn.execute("PRAGMA table_info(egress_agg)").fetchall()]
+            if cols and "agent" not in cols:
+                self._conn.execute("DROP TABLE egress_agg")
             self._conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS egress_agg (
+                  agent         TEXT NOT NULL DEFAULT '',
                   host          TEXT NOT NULL,
                   method        TEXT NOT NULL,
                   norm_path     TEXT NOT NULL,
@@ -80,7 +87,7 @@ class EgressAggregate:
                   last_seen     TEXT,
                   sample_status INTEGER,
                   query_keys    TEXT,
-                  PRIMARY KEY (host, method, norm_path, bucket)
+                  PRIMARY KEY (agent, host, method, norm_path, bucket)
                 );
                 CREATE INDEX IF NOT EXISTS idx_egress_agg_bucket ON egress_agg(bucket);
                 """
@@ -88,8 +95,10 @@ class EgressAggregate:
             self._conn.commit()
 
     def record(self, *, host: str, method: str, path: str, ts: str,
-               status: int | None = None) -> None:
-        """Fold one request into the aggregate (UPSERT on the natural key)."""
+               status: int | None = None, agent: str = "") -> None:
+        """Fold one request into the aggregate (UPSERT on the natural key). `agent` is the
+        per-agent identity (multi-agent watcher); '' = unattributed (the guard's identity)."""
+        agent = agent or ""
         host = (host or "").lower()
         method = (method or "GET").upper()
         norm = normalize_path(path)
@@ -98,24 +107,24 @@ class EgressAggregate:
         with self._lock:
             row = self._conn.execute(
                 """SELECT count, query_keys FROM egress_agg
-                   WHERE host=? AND method=? AND norm_path=? AND bucket=?""",
-                (host, method, norm, bucket),
+                   WHERE agent=? AND host=? AND method=? AND norm_path=? AND bucket=?""",
+                (agent, host, method, norm, bucket),
             ).fetchone()
             if row:
                 merged = sorted(set(json.loads(row["query_keys"] or "[]")) | new_keys)
                 self._conn.execute(
                     """UPDATE egress_agg
                        SET count = count + 1, last_seen = ?, sample_status = ?, query_keys = ?
-                       WHERE host=? AND method=? AND norm_path=? AND bucket=?""",
-                    (ts, status, json.dumps(merged), host, method, norm, bucket),
+                       WHERE agent=? AND host=? AND method=? AND norm_path=? AND bucket=?""",
+                    (ts, status, json.dumps(merged), agent, host, method, norm, bucket),
                 )
             else:
                 self._conn.execute(
                     """INSERT INTO egress_agg
-                       (host, method, norm_path, bucket, count, first_seen, last_seen,
+                       (agent, host, method, norm_path, bucket, count, first_seen, last_seen,
                         sample_status, query_keys)
-                       VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)""",
-                    (host, method, norm, bucket, ts, ts, status, json.dumps(sorted(new_keys))),
+                       VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)""",
+                    (agent, host, method, norm, bucket, ts, ts, status, json.dumps(sorted(new_keys))),
                 )
             self._conn.commit()
 
@@ -130,7 +139,7 @@ class EgressAggregate:
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         with self._lock:
             rows = self._conn.execute(
-                f"""SELECT host, method, norm_path, bucket, count, first_seen, last_seen,
+                f"""SELECT agent, host, method, norm_path, bucket, count, first_seen, last_seen,
                            sample_status, query_keys
                     FROM egress_agg {where}
                     ORDER BY bucket DESC, count DESC""",

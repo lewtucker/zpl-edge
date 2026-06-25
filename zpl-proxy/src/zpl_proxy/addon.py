@@ -242,6 +242,9 @@ class ZplLogger:
                                   subject=pa["subject"], roles=pa["roles"])
         else:
             agent = self._identity.resolve_sync(peer_ip, req_headers)
+        # Attribution carried to the hub: a resolved agent (proxy-auth/static/docker) is
+        # preserved; 'unknown' becomes '' so the Defender falls back to the guard's agent.
+        agg_agent = "" if agent.source == "unknown" else agent.agent_id
 
         req_body = flow.request.content
         resp_body = flow.response.content if flow.response else b""
@@ -300,6 +303,8 @@ class ZplLogger:
                     path=path,   # already redaction-filtered above
                     ts=ts,
                     status=flow.response.status_code if flow.response else None,
+                    # per-agent attribution; '' (unattributed) → the Defender uses the guard agent
+                    agent=agg_agent,
                 )
             except Exception as exc:
                 log.warning("egress_agg_failed", error=str(exc))
@@ -309,6 +314,7 @@ class ZplLogger:
             # monitor/unbound (captured but not evaluated).
             self._tail.append({
                 "ts": ts, "host": dest_host, "method": flow.request.method, "path": path,
+                "agent": agg_agent,
                 "status": flow.response.status_code if flow.response else None,
                 "decision": flow.metadata.get("policy_decision"),
                 "rule": flow.metadata.get("policy_rule") or None,
