@@ -13,7 +13,7 @@ from mitmproxy import http
 from mitmproxy.tools.main import mitmdump
 
 from zpl_proxy.config import ProxyConfig, load_config
-from zpl_proxy.identity import IdentityResolver
+from zpl_proxy.identity import IdentityResolver, parse_basic_proxy_auth
 from zpl_proxy.mcp import detect_mcp_frame, detect_mcp_response
 from zpl_engine import check as zpl_check, verb_for_method, zpl_token
 from zpl_proxy.storage.db import Database
@@ -57,6 +57,10 @@ class ZplLogger:
         # restart (fine — it's a live view, not durable storage).
         self._tail: deque = deque(maxlen=500)
         self._start_times: dict[str, float] = {}
+        # Per-agent identity from proxy-auth: client_conn.id → {agent, subject, roles}.
+        # Captured at CONNECT (HTTPS) where Proxy-Authorization lives, reused for every
+        # tunnelled request on that connection. Bounded — cleared on client disconnect.
+        self._conn_agent: dict[str, dict] = {}
 
     def running(self) -> None:
         """Initialize at proxy STARTUP (not lazily on first request): bring up the
@@ -116,10 +120,49 @@ class ZplLogger:
         # local file — the rule set is polled from the hub; the engine ships on redeploy.
         log.info("zpl_proxy_started", port=self._config.listen_port)
 
+    def http_connect(self, flow: http.HTTPFlow) -> None:
+        """HTTPS CONNECT — the only place Proxy-Authorization is seen for tunnelled
+        TLS. Capture the per-agent identity here and pin it to the connection so every
+        request inside the tunnel is attributed to that agent."""
+        self._ensure_init()
+        ident = self._resolve_proxy_auth(flow.request.headers.get("Proxy-Authorization"))
+        if ident:
+            self._conn_agent[flow.client_conn.id] = ident
+
+    def client_disconnected(self, client) -> None:
+        self._conn_agent.pop(getattr(client, "id", None), None)
+
     def request(self, flow: http.HTTPFlow) -> None:
         self._ensure_init()
         self._start_times[flow.id] = time.monotonic()
+        # Plaintext HTTP carries Proxy-Authorization on the request itself; strip it
+        # before forwarding (hop-by-hop) but capture the identity first.
+        pa = flow.request.headers.pop("Proxy-Authorization", None)
+        if pa and flow.client_conn.id not in self._conn_agent:
+            ident = self._resolve_proxy_auth(pa)
+            if ident:
+                self._conn_agent[flow.client_conn.id] = ident
         self._enforce(flow)   # no-ops unless the hub bundle is flag/enforce with rules
+
+    def _resolve_proxy_auth(self, header_value) -> dict | None:
+        """Map a Proxy-Authorization header to a per-agent identity via the bundle's
+        proxy_auth map ({token → {agent, subject, roles}}). The password is the lookup
+        key (a Defender-minted token); the username is a cosmetic agent label / fallback."""
+        creds = parse_basic_proxy_auth(header_value)
+        if not creds or not self._hub:
+            return None
+        user, token = creds
+        m = self._hub.proxy_auth or {}
+        entry = m.get(token) or m.get(user)
+        if not entry:
+            return None
+        return {"agent": entry.get("agent") or user,
+                "subject": entry.get("subject"),
+                "roles": entry.get("roles") or []}
+
+    def _flow_identity(self, flow: http.HTTPFlow) -> dict | None:
+        """The per-agent proxy-auth identity for this flow, if any (pinned at CONNECT)."""
+        return self._conn_agent.get(flow.client_conn.id)
 
     def response(self, flow: http.HTTPFlow) -> None:
         self._ensure_init()
@@ -144,15 +187,23 @@ class ZplLogger:
             method = flow.request.method
             path = _redact(flow.request.path, self._config.redact)
 
-            # P1: inject the subject's roles (owner memberships shipped in the bundle) so
-            # role/group ZPL rules match — exposed under BOTH `roles` (RFC `roles:{…}`) and
-            # `role` (the singular `with role:operator` form), looked up by canonical subject.
-            subject = hub.subject or "unknown"
-            roles = hub.subjects.get(zpl_token(subject)) if hub.subjects else None
+            # Identity: a per-agent proxy-auth identity (multi-agent watcher) overrides the
+            # guard's single subject/agent when present; otherwise fall back to the guard.
+            # P1: inject the subject's roles so role/group ZPL rules match — under BOTH
+            # `roles` (RFC `roles:{…}`) and `role` (the singular `with role:operator` form).
+            ident = self._flow_identity(flow)
+            if ident:
+                subject = ident["subject"] or "unknown"
+                agent = ident["agent"] or "unknown"
+                roles = ident["roles"] or (hub.subjects.get(zpl_token(subject)) if hub.subjects else None)
+            else:
+                subject = hub.subject or "unknown"
+                agent = hub.agent or "unknown"
+                roles = hub.subjects.get(zpl_token(subject)) if hub.subjects else None
             decision = zpl_check(
                 hub.crs,
                 user=subject,
-                agent_id=hub.agent or "unknown",
+                agent_id=agent,
                 tool=path, args={"path": path},
                 service=dest_host, verb=verb_for_method(method),
                 subject_attrs={"roles": roles, "role": roles} if roles else None,
@@ -182,7 +233,15 @@ class ZplLogger:
     def _record(self, flow: http.HTTPFlow, elapsed_ms: int) -> None:
         peer_ip = flow.client_conn.peername[0] if flow.client_conn.peername else "unknown"
         req_headers = _headers_dict(flow.request.headers)
-        agent = self._identity.resolve_sync(peer_ip, req_headers)
+        # Prefer the per-agent proxy-auth identity (multi-agent watcher); else the
+        # IP/Docker/header resolver.
+        pa = self._flow_identity(flow)
+        if pa:
+            from zpl_proxy.identity import AgentIdentity
+            agent = AgentIdentity(agent_id=pa["agent"], agent_role=None, source="proxy-auth",
+                                  subject=pa["subject"], roles=pa["roles"])
+        else:
+            agent = self._identity.resolve_sync(peer_ip, req_headers)
 
         req_body = flow.request.content
         resp_body = flow.response.content if flow.response else b""

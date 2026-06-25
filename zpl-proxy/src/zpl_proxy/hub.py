@@ -50,6 +50,7 @@ class WatcherHub:
         self.crs = None
         self.mode: str = "monitor"
         self.subjects: dict = {}   # P1: {subject → [roles]} from the bundle (owner memberships)
+        self.proxy_auth: dict = {}  # multi-agent: {token → {agent, subject, roles}} from the bundle
         self._bundle_version: str | None = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="watcher-hub", daemon=True)
@@ -137,6 +138,7 @@ class WatcherHub:
         self.crs = crs
         self.mode = mode
         self.subjects = b.get("subjects") or {}   # P1: refreshed with the rule set (folded into version)
+        self.proxy_auth = b.get("proxy_auth") or {}  # multi-agent: token → {agent, subject, roles}
         self._bundle_version = version
         log.info("watcher_bundle_applied", version=version, mode=mode, rules=bool(crs))
 

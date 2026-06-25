@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -14,8 +16,31 @@ from zpl_proxy.config import StaticIdentity
 class AgentIdentity:
     agent_id: str
     agent_role: Optional[str]
-    source: str  # 'static' | 'docker' | 'header' | 'unknown'
+    source: str  # 'static' | 'docker' | 'header' | 'proxy-auth' | 'unknown'
     raw_labels: dict = field(default_factory=dict)
+    subject: Optional[str] = None      # the person, for ZPL enforcement (proxy-auth only)
+    roles: list = field(default_factory=list)  # subject's roles, for P1 injection
+
+
+def parse_basic_proxy_auth(header_value: Optional[str]) -> Optional[tuple[str, str]]:
+    """Parse `Proxy-Authorization: Basic base64(user:pass)` → (user, pass).
+
+    Returns None for an absent or malformed header. Used to read the per-agent
+    identity we encode in each agent's proxy URL (`http://<agent>:<token>@host:port`).
+    """
+    if not header_value:
+        return None
+    parts = header_value.split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "basic":
+        return None
+    try:
+        raw = base64.b64decode(parts[1], validate=True).decode("utf-8", "replace")
+    except (binascii.Error, ValueError):
+        return None
+    if ":" not in raw:
+        return None
+    user, pw = raw.split(":", 1)
+    return user, pw
 
 
 _UNKNOWN = AgentIdentity(agent_id="unknown", agent_role=None, source="unknown")
