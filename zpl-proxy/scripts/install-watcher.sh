@@ -12,7 +12,7 @@
 #
 # Usage:
 #   install-watcher.sh --hub-url https://mcp-defender.lewtucker.net \
-#                      --guard-token <token> [--port 8080] [--repo-dir ~/mcp-defender]
+#                      --guard-token <token> [--port 8080] [--repo-dir ~/zpl-edge]
 #
 # The token is a secret: pass it on the CLI (or via ZPL_HUB_GUARD_TOKEN) — it is
 # written to config/proxy.local.yaml (chmod 600, gitignored) and never echoed.
