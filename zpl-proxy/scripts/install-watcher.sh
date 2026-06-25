@@ -135,8 +135,14 @@ if [ "$OS" = "Darwin" ]; then
 </plist>
 EOF
   launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
-  launchctl bootstrap "gui/$(id -u)" "$PLIST"
-  launchctl kickstart -k "gui/$(id -u)/$LABEL"
+  if ! launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null; then
+    # `bootstrap` into the GUI domain fails from a headless SSH session
+    # ("Bootstrap failed: 5: Input/output error") — fall back to the legacy
+    # loader, which works there. Both end with the agent loaded + running.
+    launchctl unload "$PLIST" 2>/dev/null || true
+    launchctl load -w "$PLIST"
+  fi
+  launchctl kickstart -k "gui/$(id -u)/$LABEL" 2>/dev/null || true
   VIEW_LOG="tail -f $LOG"
 elif [ "$OS" = "Linux" ]; then
   say "systemd service ($LABEL) — needs sudo"
