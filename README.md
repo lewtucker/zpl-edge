@@ -9,7 +9,9 @@ private control plane.
   matching, shared by the watcher here and by the Defender control plane.
 - **`zpl-proxy/`** — the **HTTP egress watcher**: a [mitmproxy](https://mitmproxy.org) process that
   intercepts an agent's outbound HTTP(S), logs/aggregates it, and enforces the ZPL rule set its
-  guard delivers from the Defender. Depends on `zpl-engine`.
+  guard delivers from the Defender. Depends on `zpl-engine`. One watcher can front **multiple
+  agents** — give each a per-agent proxy URL (`http://<agent>:<token>@host:port`, minted in the
+  portal) and the watcher governs + attributes each separately.
 
 A running watcher is bound to a **guard** on an MCP Defender control plane (it pulls its rule set
 and pushes logs over an outbound channel). The watcher is useless on its own — it needs a Defender
