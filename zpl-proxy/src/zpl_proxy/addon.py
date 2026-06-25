@@ -129,11 +129,14 @@ class ZplLogger:
     def http_connect(self, flow: http.HTTPFlow) -> None:
         """HTTPS CONNECT — the only place Proxy-Authorization is seen for tunnelled
         TLS. Capture the per-agent identity here and pin it to the connection so every
-        request inside the tunnel is attributed to that agent."""
+        request inside the tunnel is attributed to that agent. Admission control: if no
+        valid credential is presented, refuse the tunnel with 407 (see _admission_enforced)."""
         self._ensure_init()
         ident = self._resolve_proxy_auth(flow.request.headers.get("Proxy-Authorization"))
         if ident:
             self._conn_agent[flow.client_conn.id] = ident
+        elif self._admission_enforced():
+            flow.response = self._reject_407()
 
     def client_disconnected(self, client) -> None:
         self._conn_agent.pop(getattr(client, "id", None), None)
@@ -148,7 +151,33 @@ class ZplLogger:
             ident = self._resolve_proxy_auth(pa)
             if ident:
                 self._conn_agent[flow.client_conn.id] = ident
+        # Admission control (all modes): a request with no resolved identity is rejected
+        # before any enforcement. HTTPS is already gated at CONNECT; this catches plaintext
+        # HTTP (no CONNECT) and any unpinned connection.
+        if flow.client_conn.id not in self._conn_agent and self._admission_enforced():
+            flow.response = self._reject_407()
+            return
         self._enforce(flow)   # no-ops unless the hub bundle is flag/enforce with rules
+
+    def _admission_enforced(self) -> bool:
+        """Require a valid proxy_auth credential — but only once the hub has delivered a
+        non-empty proxy_auth map. This is self-coordinating: the watcher starts rejecting
+        un-credentialed egress exactly when an updated Defender seeds credentials (the
+        guard's own token, always; plus any per-agent tokens). No hub (local dev) or a
+        pre-first-bundle window → don't reject, so the agent isn't bricked at startup."""
+        return bool(self._hub and self._hub.proxy_auth)
+
+    @staticmethod
+    def _reject_407() -> http.Response:
+        """407 Proxy Authentication Required — no identity, no service (admission control)."""
+        return http.Response.make(
+            407,
+            json.dumps({"error": "proxy authentication required",
+                        "reason": "present a Defender-minted proxy credential: "
+                                  "http://<agent>:<token>@host:port"}).encode(),
+            {"Content-Type": "application/json",
+             "Proxy-Authenticate": 'Basic realm="mcp-defender-watcher"'},
+        )
 
     def _resolve_proxy_auth(self, header_value) -> dict | None:
         """Map a Proxy-Authorization header to a per-agent identity via the bundle's
