@@ -1,0 +1,33 @@
+listen_host: "0.0.0.0"
+listen_port: 8080
+
+data_dir: "./data"
+docker_socket: "/var/run/docker.sock"
+docker_cache_ttl: 30       # seconds
+identity_header: "X-ZPL-Agent-ID"
+
+body_size_limit: 1048576   # 1 MB — bodies larger than this are not stored in full
+log_level: "INFO"
+
+# Static IP → agent identity (for bare-metal agents not running in Docker)
+# Add entries here for any machines running agents outside Docker.
+# Copy this file to proxy.local.yaml (gitignored) for machine-specific settings.
+identities: []
+#  - ip: "192.168.4.34"
+#    agent_id: "openclaw"
+#    agent_role: "automation-agent"
+
+# Token/secret redaction — patterns replaced in logged paths before storage.
+# Add bearer tokens, bot tokens, or API keys that appear in URLs here.
+# Use proxy.local.yaml (gitignored) to keep real tokens out of git.
+redact: []
+#  - pattern: "YOUR_TELEGRAM_BOT_TOKEN"
+#    replacement: "<bot-name-telegram-token>"
+
+# Pass-through hosts — mitmproxy ignore_hosts regexes (matched against "host:port").
+# Matching connections are tunneled raw: NOT TLS-intercepted, logged, aggregated, or
+# shipped. Use for noisy/sensitive egress the agent routes through us anyway but we
+# don't govern (e.g. Telegram bot long-polling, which also carries the bot token).
+# Set real entries in proxy.local.yaml — they append to this list.
+ignore_hosts: []
+#  - "api\\.telegram\\.org"

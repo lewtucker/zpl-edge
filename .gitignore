@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.DS_Store
+
+# Watcher runtime + secrets — never commit
+zpl-proxy/data/*
+!zpl-proxy/data/.gitkeep
+zpl-proxy/certs/*
+!zpl-proxy/certs/.gitkeep
+zpl-proxy/config/proxy.local.yaml

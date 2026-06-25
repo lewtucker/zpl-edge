@@ -1,0 +1,58 @@
+services:
+
+  zpl-proxy:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data                              # observations.db + requests.jsonl
+      - ./certs:/app/certs                            # mitmproxy CA cert (persisted)
+      - /var/run/docker.sock:/var/run/docker.sock:ro  # Docker identity resolution
+      - ./config/proxy.yaml:/app/config/proxy.yaml:ro
+    environment:
+      - LOG_LEVEL=INFO
+      - ZPL_CONFIG=/app/config/proxy.yaml
+    networks:
+      - lab-net
+    restart: unless-stopped
+
+  # --- Agent stubs (uncomment and adapt for your environment) ---
+  #
+  # openclaw:
+  #   image: openclaw:latest
+  #   environment:
+  #     HTTP_PROXY: http://zpl-proxy:8080
+  #     HTTPS_PROXY: http://zpl-proxy:8080
+  #     # Python: trust the mitmproxy CA cert
+  #     SSL_CERT_FILE: /etc/ssl/certs/mitmproxy-ca.pem
+  #     REQUESTS_CA_BUNDLE: /etc/ssl/certs/mitmproxy-ca.pem
+  #   volumes:
+  #     - ./certs/mitmproxy-ca-cert.pem:/etc/ssl/certs/mitmproxy-ca.pem:ro
+  #   labels:
+  #     zpl.agent_id: openclaw
+  #     zpl.agent_role: automation-agent
+  #   networks:
+  #     - lab-net
+  #   depends_on:
+  #     - zpl-proxy
+  #
+  # hermes:
+  #   image: hermes:latest
+  #   environment:
+  #     HTTP_PROXY: http://zpl-proxy:8080
+  #     HTTPS_PROXY: http://zpl-proxy:8080
+  #     SSL_CERT_FILE: /etc/ssl/certs/mitmproxy-ca.pem
+  #     REQUESTS_CA_BUNDLE: /etc/ssl/certs/mitmproxy-ca.pem
+  #   volumes:
+  #     - ./certs/mitmproxy-ca-cert.pem:/etc/ssl/certs/mitmproxy-ca.pem:ro
+  #   labels:
+  #     zpl.agent_id: hermes
+  #     zpl.agent_role: automation-agent
+  #   networks:
+  #     - lab-net
+  #   depends_on:
+  #     - zpl-proxy
+
+networks:
+  lab-net:
+    driver: bridge
