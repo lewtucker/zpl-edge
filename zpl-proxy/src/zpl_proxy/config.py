@@ -46,6 +46,13 @@ class ProxyConfig:
     # guard token. Put the real token in proxy.local.yaml (gitignored).
     hub_url: Optional[str] = None
     hub_guard_token: Optional[str] = None
+    # Local-store retention / caps (P0 — keep the watcher's disk bounded).
+    # retention_days: prune aggregate buckets older than this. max_capture_mb: size cap for
+    # requests.jsonl (rotated). capture_bodies: keep request/response bodies in the forensic log
+    # (off by default — the hub only needs aggregate metadata, and bodies are the bulk of growth).
+    retention_days: int = 14
+    max_capture_mb: int = 500
+    capture_bodies: bool = False
 
 
 def load_config(path: Path | None = None) -> ProxyConfig:
@@ -99,4 +106,7 @@ def load_config(path: Path | None = None) -> ProxyConfig:
         ignore_hosts=[str(h) for h in raw.get("ignore_hosts", [])],
         hub_url=raw.get("hub_url") or os.environ.get("ZPL_HUB_URL"),
         hub_guard_token=raw.get("hub_guard_token") or os.environ.get("ZPL_HUB_GUARD_TOKEN"),
+        retention_days=int(raw.get("retention_days", 14)),
+        max_capture_mb=int(raw.get("max_capture_mb", 500)),
+        capture_bodies=bool(raw.get("capture_bodies", False)),
     )

@@ -86,6 +86,13 @@ listen_port: $LISTEN_PORT
 # Enforcement MODE (monitor/flag/enforce) + the rule set are set on the GUARD in
 # the portal and delivered via the bundle — not here.
 
+# Local-store retention / caps (defaults shown). The watcher prunes aggregate
+# buckets older than retention_days, rotates requests.jsonl at max_capture_mb, and
+# keeps request/response bodies only when capture_bodies is true.
+# retention_days: 14
+# max_capture_mb: 500
+# capture_bodies: false
+
 # Long-poll / token-bearing hosts to tunnel raw (never intercept). Appends to base.
 ignore_hosts:
   - 'api\.telegram\.org'

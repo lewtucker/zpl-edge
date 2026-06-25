@@ -4,7 +4,7 @@ import json
 import os
 import time
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -16,7 +16,6 @@ from zpl_proxy.config import ProxyConfig, load_config
 from zpl_proxy.identity import IdentityResolver, parse_basic_proxy_auth
 from zpl_proxy.mcp import detect_mcp_frame, detect_mcp_response
 from zpl_engine import check as zpl_check, verb_for_method, zpl_token
-from zpl_proxy.storage.db import Database
 from zpl_proxy.storage.jsonl import JsonlWriter
 
 log = structlog.get_logger()
@@ -48,7 +47,6 @@ class ZplLogger:
         self._config: ProxyConfig | None = None
         self._identity: IdentityResolver | None = None
         self._jsonl: JsonlWriter | None = None
-        self._db: Database | None = None
         self._agg = None  # EgressAggregate | None — bucketed dedup store (Phase 1b)
         self._hub = None  # WatcherHub | None — reverse-channel client to the hub
                           # (also holds the compiled rule set + mode for enforcement)
@@ -61,6 +59,10 @@ class ZplLogger:
         # Captured at CONNECT (HTTPS) where Proxy-Authorization lives, reused for every
         # tunnelled request on that connection. Bounded — cleared on client disconnect.
         self._conn_agent: dict[str, dict] = {}
+        # P0 local-store maintenance: throttle the periodic prune/disk-check; pause
+        # capture (never egress) when the volume is low on space.
+        self._last_maintain: float = 0.0
+        self._capture_paused: bool = False
 
     def running(self) -> None:
         """Initialize at proxy STARTUP (not lazily on first request): bring up the
@@ -98,8 +100,8 @@ class ZplLogger:
             cache_ttl=self._config.docker_cache_ttl,
             static_identities=self._config.identities,
         )
-        self._jsonl = JsonlWriter(self._config.data_dir / "requests.jsonl")
-        self._db = Database(self._config.data_dir / "observations.db")
+        self._jsonl = JsonlWriter(self._config.data_dir / "requests.jsonl",
+                                  max_bytes=self._config.max_capture_mb * 1024 * 1024)
 
         # Phase 1b: the durable, hub-pullable egress store — bucketed + deduped.
         from zpl_proxy.storage.aggregate import EgressAggregate
@@ -273,7 +275,7 @@ class ZplLogger:
             "method": flow.request.method,
             "path": path,
             "request_headers": json.dumps(req_headers),
-            "request_body": _safe_body(req_body, self._config.body_size_limit),
+            "request_body": _safe_body(req_body, self._config.body_size_limit) if self._config.capture_bodies else None,
             # MCP
             "mcp_method": mcp_req.method if mcp_req else None,
             "tool_name": mcp_req.tool_name if mcp_req else None,
@@ -282,7 +284,7 @@ class ZplLogger:
             "response_code": flow.response.status_code if flow.response else None,
             "response_time_ms": elapsed_ms,
             "response_headers": json.dumps(_headers_dict(flow.response.headers)) if flow.response else None,
-            "response_body": _safe_body(resp_body, self._config.body_size_limit),
+            "response_body": _safe_body(resp_body, self._config.body_size_limit) if self._config.capture_bodies else None,
             # MCP response
             "tool_result": json.dumps(mcp_resp.tool_result) if (mcp_resp and mcp_resp.tool_result) else None,
             # Policy enforcement
@@ -290,8 +292,9 @@ class ZplLogger:
             "policy_rule_id": flow.metadata.get("policy_rule_id"),
         }
 
-        self._jsonl.write(record)
-        self._db.insert(record)
+        if not self._capture_paused:
+            self._jsonl.write(record)   # forensic log (rotated; bodies only if capture_bodies)
+        self._maybe_maintain()          # throttled: prune old aggregate buckets + disk check
 
         # Phase 1b durable store: fold every HTTP request into the bucketed aggregate.
         # This is what the hub pulls on demand (deduped, secret-scrubbed).
@@ -323,7 +326,9 @@ class ZplLogger:
         # No continuous push: the hub pulls deduped slices on demand from the
         # aggregate (see hub.WatcherHub). Egress stays entirely local until fetched.
 
-        log.info(
+        # Per-request line is DEBUG so the default-INFO log doesn't grow per request
+        # (decisions surface via request_flagged/request_blocked in _enforce).
+        log.debug(
             "request_logged",
             agent=agent.agent_id,
             type=request_type,
@@ -334,13 +339,35 @@ class ZplLogger:
             status=flow.response.status_code if flow.response else None,
         )
 
+    def _maybe_maintain(self) -> None:
+        """Throttled (~hourly) local-store upkeep: prune aggregate buckets past the
+        retention window and pause forensic capture if the volume is low on space.
+        Never raises into the request path; never blocks egress."""
+        import shutil
+        now = time.monotonic()
+        if now - self._last_maintain < 3600:
+            return
+        self._last_maintain = now
+        try:
+            if self._agg is not None and self._config.retention_days > 0:
+                cutoff = (datetime.now(timezone.utc)
+                          - timedelta(days=self._config.retention_days)).isoformat()
+                removed = self._agg.prune(cutoff)
+                if removed:
+                    log.info("egress_agg_pruned", removed=removed, retention_days=self._config.retention_days)
+            free_mb = shutil.disk_usage(self._config.data_dir).free / (1024 * 1024)
+            paused = free_mb < 200
+            if paused != self._capture_paused:
+                self._capture_paused = paused
+                log.warning("capture_paused", paused=paused, free_mb=int(free_mb))
+        except Exception as exc:  # never let upkeep break logging/egress
+            log.warning("maintain_failed", error=str(exc))
+
     def done(self) -> None:
         if self._hub:
             self._hub.stop()
         if self._jsonl:
             self._jsonl.close()
-        if self._db:
-            self._db.close()
         if self._agg:
             self._agg.close()
 

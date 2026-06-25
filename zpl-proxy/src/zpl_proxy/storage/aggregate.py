@@ -152,5 +152,14 @@ class EgressAggregate:
             out.append(d)
         return out
 
+    def prune(self, before_ts: str) -> int:
+        """Delete aggregate buckets older than `before_ts` (ISO). Returns rows removed.
+        Keeps the local store bounded under a retention window."""
+        cutoff = _bucket(before_ts)
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM egress_agg WHERE bucket < ?", (cutoff,))
+            self._conn.commit()
+            return cur.rowcount
+
     def close(self) -> None:
         self._conn.close()
