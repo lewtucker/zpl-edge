@@ -161,5 +161,14 @@ class EgressAggregate:
             self._conn.commit()
             return cur.rowcount
 
+    def summary(self) -> dict:
+        """Lightweight stats for the watcher heartbeat: total events folded, distinct
+        endpoint rows, and the oldest/newest bucket retained."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COALESCE(SUM(count),0), COUNT(*), MIN(bucket), MAX(bucket) FROM egress_agg"
+            ).fetchone()
+        return {"events": row[0], "rows": row[1], "oldest_bucket": row[2], "newest_bucket": row[3]}
+
     def close(self) -> None:
         self._conn.close()

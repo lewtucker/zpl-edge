@@ -63,6 +63,8 @@ class ZplLogger:
         # capture (never egress) when the volume is low on space.
         self._last_maintain: float = 0.0
         self._capture_paused: bool = False
+        self._stats_cache: dict = {}
+        self._stats_at: float = 0.0
 
     def running(self) -> None:
         """Initialize at proxy STARTUP (not lazily on first request): bring up the
@@ -115,6 +117,7 @@ class ZplLogger:
                 self._config.hub_url, self._config.hub_guard_token, self._agg,
                 listen=listen, hostname=socket.gethostname(),
                 tail_source=lambda: list(self._tail),
+                stats_source=self.stats,
             )
             log.info("watcher_hub_enabled", hub=self._config.hub_url)
 
@@ -338,6 +341,29 @@ class ZplLogger:
             tool=mcp_req.tool_name if mcp_req else None,
             status=flow.response.status_code if flow.response else None,
         )
+
+    def stats(self) -> dict:
+        """Local-store stats for the hub heartbeat (cached ~120s — the disk walk is cheap
+        but not worth doing per poll). Bytes per store + event/age summary + capture state."""
+        now = time.monotonic()
+        if self._stats_cache and now - self._stats_at < 120:
+            return self._stats_cache
+        import os
+        dd = self._config.data_dir
+        def sz(pattern):
+            return sum((f.stat().st_size for f in dd.glob(pattern) if f.is_file()), 0)
+        s = {"capture_bytes": sz("requests.jsonl*"), "agg_bytes": sz("egress_agg.db*"),
+             "log_bytes": sz("watcher.log*"),
+             "capture_paused": self._capture_paused,
+             "retention_days": self._config.retention_days,
+             "max_capture_mb": self._config.max_capture_mb}
+        try:
+            if self._agg is not None:
+                s.update(self._agg.summary())
+        except Exception:
+            pass
+        self._stats_cache, self._stats_at = s, now
+        return s
 
     def _maybe_maintain(self) -> None:
         """Throttled (~hourly) local-store upkeep: prune aggregate buckets past the

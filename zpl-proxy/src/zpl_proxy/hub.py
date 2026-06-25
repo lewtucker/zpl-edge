@@ -25,16 +25,18 @@ class WatcherHub:
     def __init__(self, hub_url: str, guard_token: str, aggregate, *,
                  listen: str = "", hostname: str = "", version: str = "0.1",
                  poll_interval: float = 5.0, autostart: bool = True,
-                 tail_source=None) -> None:
+                 tail_source=None, stats_source=None) -> None:
         base = hub_url.rstrip("/")
         self._register_url = base + "/api/watcher/register"
         self._commands_url = base + "/api/watcher/commands"
         self._logs_url = base + "/api/watcher/logs"
         self._bundle_url = base + "/api/watcher/bundle"
         self._tail_url = base + "/api/watcher/tail"
+        self._heartbeat_url = base + "/api/watcher/heartbeat"
         self._token = guard_token
         self._agg = aggregate
         self._tail_source = tail_source   # callable → list of recent event dicts
+        self._stats_source = stats_source  # callable → local-store stats dict (heartbeat)
         self._listen = listen
         self._hostname = hostname
         self._version = version
@@ -73,6 +75,7 @@ class WatcherHub:
                     if self._registered:
                         self._poll_once(client)
                         self._poll_bundle(client)
+                        self._heartbeat(client)
                 except Exception as exc:  # never let the loop die
                     log.warning("watcher_hub_tick_failed", error=str(exc))
                 self._stop.wait(self._poll)
@@ -99,6 +102,17 @@ class WatcherHub:
             self.agent = ag
         if changed:  # log on first set + whenever a portal edit propagates (no restart)
             log.info("watcher_identity_updated", subject=self.subject, agent=self.agent)
+
+    def _heartbeat(self, client: httpx.Client) -> None:
+        """Report liveness + local-store stats so the portal shows watcher health
+        (disk used, events, age, capture state). Best-effort; never blocks."""
+        stats = self._stats_source() if self._stats_source else {}
+        resp = client.post(self._heartbeat_url, headers=self._headers, json={
+            "hostname": self._hostname, "version": self._version,
+            "listen": self._listen, "stats": stats,
+        })
+        if resp.status_code != 200:
+            log.warning("watcher_heartbeat_rejected", status=resp.status_code)
 
     def _poll_once(self, client: httpx.Client) -> None:
         resp = client.get(self._commands_url, headers=self._headers)
