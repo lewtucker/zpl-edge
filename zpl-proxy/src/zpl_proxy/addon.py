@@ -280,6 +280,9 @@ class ZplLogger:
         # Attribution carried to the hub: a resolved agent (proxy-auth/static/docker) is
         # preserved; 'unknown' becomes '' so the Defender falls back to the guard's agent.
         agg_agent = "" if agent.source == "unknown" else agent.agent_id
+        # The per-agent subject travels alongside, so the Defender stamps user_id per-agent
+        # rather than defaulting to the guard's subject. '' → guard subject fallback.
+        agg_subject = "" if agent.source == "unknown" else (agent.subject or "")
 
         req_body = flow.request.content
         resp_body = flow.response.content if flow.response else b""
@@ -341,6 +344,7 @@ class ZplLogger:
                     status=flow.response.status_code if flow.response else None,
                     # per-agent attribution; '' (unattributed) → the Defender uses the guard agent
                     agent=agg_agent,
+                    subject=agg_subject,
                 )
             except Exception as exc:
                 log.warning("egress_agg_failed", error=str(exc))

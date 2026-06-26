@@ -72,12 +72,13 @@ class EgressAggregate:
             # distinct. Older dbs lack the column — drop the derived cache and rebuild it
             # under the new schema (raw requests.jsonl is untouched; only aggregates reset).
             cols = [r[1] for r in self._conn.execute("PRAGMA table_info(egress_agg)").fetchall()]
-            if cols and "agent" not in cols:
+            if cols and ("agent" not in cols or "subject" not in cols):
                 self._conn.execute("DROP TABLE egress_agg")
             self._conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS egress_agg (
                   agent         TEXT NOT NULL DEFAULT '',
+                  subject       TEXT NOT NULL DEFAULT '',
                   host          TEXT NOT NULL,
                   method        TEXT NOT NULL,
                   norm_path     TEXT NOT NULL,
@@ -95,10 +96,13 @@ class EgressAggregate:
             self._conn.commit()
 
     def record(self, *, host: str, method: str, path: str, ts: str,
-               status: int | None = None, agent: str = "") -> None:
+               status: int | None = None, agent: str = "", subject: str = "") -> None:
         """Fold one request into the aggregate (UPSERT on the natural key). `agent` is the
-        per-agent identity (multi-agent watcher); '' = unattributed (the guard's identity)."""
+        per-agent identity (multi-agent watcher); '' = unattributed (the guard's identity).
+        `subject` is that agent's ZPL subject — carried so the Defender stamps user_id
+        per-agent instead of falling back to the guard's subject."""
         agent = agent or ""
+        subject = subject or ""
         host = (host or "").lower()
         method = (method or "GET").upper()
         norm = normalize_path(path)
@@ -114,17 +118,17 @@ class EgressAggregate:
                 merged = sorted(set(json.loads(row["query_keys"] or "[]")) | new_keys)
                 self._conn.execute(
                     """UPDATE egress_agg
-                       SET count = count + 1, last_seen = ?, sample_status = ?, query_keys = ?
+                       SET count = count + 1, last_seen = ?, sample_status = ?, query_keys = ?, subject = ?
                        WHERE agent=? AND host=? AND method=? AND norm_path=? AND bucket=?""",
-                    (ts, status, json.dumps(merged), agent, host, method, norm, bucket),
+                    (ts, status, json.dumps(merged), subject, agent, host, method, norm, bucket),
                 )
             else:
                 self._conn.execute(
                     """INSERT INTO egress_agg
-                       (agent, host, method, norm_path, bucket, count, first_seen, last_seen,
+                       (agent, subject, host, method, norm_path, bucket, count, first_seen, last_seen,
                         sample_status, query_keys)
-                       VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)""",
-                    (agent, host, method, norm, bucket, ts, ts, status, json.dumps(sorted(new_keys))),
+                       VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)""",
+                    (agent, subject, host, method, norm, bucket, ts, ts, status, json.dumps(sorted(new_keys))),
                 )
             self._conn.commit()
 
@@ -139,7 +143,7 @@ class EgressAggregate:
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         with self._lock:
             rows = self._conn.execute(
-                f"""SELECT agent, host, method, norm_path, bucket, count, first_seen, last_seen,
+                f"""SELECT agent, subject, host, method, norm_path, bucket, count, first_seen, last_seen,
                            sample_status, query_keys
                     FROM egress_agg {where}
                     ORDER BY bucket DESC, count DESC""",

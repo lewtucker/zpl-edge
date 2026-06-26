@@ -183,6 +183,7 @@ class WatcherHub:
             "query_keys": r["query_keys"], "first_seen": r["first_seen"],
             "last_seen": r["last_seen"], "ts": r["last_seen"],
             "agent": r.get("agent") or "",   # per-agent attribution (multi-agent watcher)
+            "subject": r.get("subject") or "",   # per-agent ZPL subject → Defender stamps user_id
         } for r in rows]
         resp = client.post(self._logs_url, headers=self._headers,
                            json={"command_id": cmd.get("id"), "records": records})
