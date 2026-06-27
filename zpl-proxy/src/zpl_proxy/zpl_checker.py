@@ -16,5 +16,6 @@ from zpl_engine.checker import (  # explicit re-exports the watcher imports
     check,
     compile_rules,
     lint_rules,
+    service_reachable,
     verb_for_method,
 )

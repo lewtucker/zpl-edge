@@ -15,7 +15,7 @@ from mitmproxy.tools.main import mitmdump
 from zpl_proxy.config import ProxyConfig, load_config
 from zpl_proxy.identity import IdentityResolver, parse_basic_proxy_auth
 from zpl_proxy.mcp import detect_mcp_frame, detect_mcp_response
-from zpl_engine import check as zpl_check, verb_for_method, zpl_token
+from zpl_engine import check as zpl_check, service_reachable, verb_for_method, zpl_token, VERB
 from zpl_proxy.storage.jsonl import JsonlWriter
 
 log = structlog.get_logger()
@@ -199,6 +199,17 @@ class ZplLogger:
         """The per-agent proxy-auth identity for this flow, if any (pinned at CONNECT)."""
         return self._conn_agent.get(flow.client_conn.id)
 
+    def responseheaders(self, flow: http.HTTPFlow) -> None:
+        """Stream Server-Sent-Events responses straight through instead of buffering the
+        (never-ending) body. Without this, mitmproxy holds the first event until the body
+        completes — which for SSE is never — so streaming/SSE MCP servers time out. Decided
+        from the response content-type at header time; the request was already enforced
+        before this fires. Body capture is skipped for streamed flows (see _record)."""
+        ct = (flow.response.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+        if ct == "text/event-stream":
+            flow.response.stream = True
+            flow.metadata["streamed"] = True
+
     def response(self, flow: http.HTTPFlow) -> None:
         self._ensure_init()
         elapsed_ms = int((time.monotonic() - self._start_times.pop(flow.id, time.monotonic())) * 1000)
@@ -235,32 +246,65 @@ class ZplLogger:
                 subject = hub.subject or "unknown"
                 agent = hub.agent or "unknown"
                 roles = hub.subjects.get(zpl_token(subject)) if hub.subjects else None
-            decision = zpl_check(
-                hub.crs,
-                user=subject,
-                agent_id=agent,
-                tool=path, args={"path": path},
-                service=dest_host, verb=verb_for_method(method),
-                subject_attrs={"roles": roles, "role": roles} if roles else None,
-            )
-            flow.metadata["policy_verdict"] = "allow" if decision.allowed else "deny"
-            flow.metadata["policy_rule"] = decision.rule_name or ""
+            subject_attrs = {"roles": roles, "role": roles} if roles else None
+
+            # MCP-aware classification. MCP clients advertise `Accept: text/event-stream`
+            # (SSE transport) or `…, text/event-stream` (Streamable HTTP), which marks a
+            # request as MCP transport:
+            #   • tools/call → PER-TOOL check (tool name + args) — fine-grained policy.
+            #   • SSE open / initialize / tools/list / notifications → REACHABILITY: is the
+            #     principal allowed ANY tool on this host? Authorized servers' sessions start;
+            #     an unauthorized server (no allow rule) is blocked at the handshake.
+            # Non-MCP egress keeps the host/path/verb check. The parsed frame is stashed so
+            # _record reuses it (no double parse). Tool calls live in the REQUEST body, which
+            # is always buffered, so streaming the response (Part 1) never hides a call.
+            accept = (flow.request.headers.get("accept") or "").lower()
+            is_mcp_transport = "text/event-stream" in accept
+            mcp = None
+            if (is_mcp_transport and flow.request.content
+                    and len(flow.request.content) <= self._config.body_size_limit):
+                mcp = detect_mcp_frame(flow.request.content,
+                                       flow.request.headers.get("content-type", ""))
+                if mcp is not None:
+                    flow.metadata["mcp_frame"] = mcp   # reused by _record
+
+            if mcp is not None and mcp.method == "tools/call":
+                d = zpl_check(hub.crs, user=subject, agent_id=agent,
+                              tool=mcp.tool_name or "", args=mcp.tool_args or {},
+                              service=dest_host, verb=VERB, subject_attrs=subject_attrs)
+                allowed, rule_name, reason = d.allowed, d.rule_name, d.reason
+            elif is_mcp_transport:
+                allowed = service_reachable(hub.crs, user=subject, agent_id=agent,
+                                            service=dest_host, subject_attrs=subject_attrs)
+                rule_name = None
+                reason = ("reachable: an allow rule grants access to this server"
+                          if allowed else
+                          f"no allow rule for MCP server '{dest_host}' (default deny)")
+            else:
+                d = zpl_check(hub.crs, user=subject, agent_id=agent,
+                              tool=path, args={"path": path},
+                              service=dest_host, verb=verb_for_method(method),
+                              subject_attrs=subject_attrs)
+                allowed, rule_name, reason = d.allowed, d.rule_name, d.reason
+
+            flow.metadata["policy_verdict"] = "allow" if allowed else "deny"
+            flow.metadata["policy_rule"] = rule_name or ""
             # Effective, mode-adjusted decision (what the hub UI shows): allow→allowed,
             # deny→denied under enforce (blocked) or flagged under flag (passed through).
             flow.metadata["policy_decision"] = (
-                "allowed" if decision.allowed
+                "allowed" if allowed
                 else ("denied" if hub.mode == "enforce" else "flagged"))
 
-            if not decision.allowed:
+            if not allowed:
                 if hub.mode == "enforce":
                     body = json.dumps({"error": "blocked by ZPL policy",
-                                       "reason": decision.reason}).encode()
+                                       "reason": reason}).encode()
                     flow.response = http.Response.make(403, body, {"Content-Type": "application/json"})
                     log.info("request_blocked", host=dest_host, method=method, path=path,
-                             reason=decision.reason)
+                             reason=reason)
                 else:  # flag
                     log.info("request_flagged", host=dest_host, method=method, path=path,
-                             reason=decision.reason)
+                             reason=reason)
         except Exception as exc:
             # Fail open on unexpected errors — log but don't block.
             log.error("enforce_error", error=str(exc), flow_id=flow.id)
@@ -285,10 +329,16 @@ class ZplLogger:
         agg_subject = "" if agent.source == "unknown" else (agent.subject or "")
 
         req_body = flow.request.content
-        resp_body = flow.response.content if flow.response else b""
+        # A streamed response (SSE) was passed through unbuffered — its body isn't held,
+        # so don't try to read/capture it (see responseheaders).
+        streamed = bool(flow.metadata.get("streamed"))
+        resp_body = b"" if streamed else (flow.response.content if flow.response else b"")
 
-        mcp_req = detect_mcp_frame(req_body, flow.request.headers.get("content-type", ""))
-        mcp_resp = detect_mcp_response(resp_body) if mcp_req else None
+        # Reuse the frame already parsed in _enforce (flag/enforce); otherwise parse now.
+        mcp_req = flow.metadata.get("mcp_frame")
+        if mcp_req is None:
+            mcp_req = detect_mcp_frame(req_body, flow.request.headers.get("content-type", ""))
+        mcp_resp = detect_mcp_response(resp_body) if (mcp_req and not streamed) else None
 
         parsed = urlparse(flow.request.pretty_url)
         dest_host = parsed.hostname or flow.request.host
@@ -320,7 +370,8 @@ class ZplLogger:
             "response_code": flow.response.status_code if flow.response else None,
             "response_time_ms": elapsed_ms,
             "response_headers": json.dumps(_headers_dict(flow.response.headers)) if flow.response else None,
-            "response_body": _safe_body(resp_body, self._config.body_size_limit) if self._config.capture_bodies else None,
+            "response_body": ("<streamed>" if streamed else
+                              (_safe_body(resp_body, self._config.body_size_limit) if self._config.capture_bodies else None)),
             # MCP response
             "tool_result": json.dumps(mcp_resp.tool_result) if (mcp_resp and mcp_resp.tool_result) else None,
             # Policy enforcement

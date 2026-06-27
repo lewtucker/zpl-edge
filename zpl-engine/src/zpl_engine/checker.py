@@ -462,3 +462,48 @@ def check(crs: CompiledRuleSet, *, user: str, agent_id: str, tool: str,
         reason=reason,
         trace=[t.to_dict() for t in result.trace],
     )
+
+
+def service_reachable(crs: CompiledRuleSet, *, user: str, agent_id: str,
+                      service: str, subject_attrs: dict | None = None) -> bool:
+    """True iff some Allow rule grants this principal ANY access on `service`.
+
+    Reachability deliberately ignores the object (tool), verb, and `when:` — it asks
+    only "is this (subject, agent, roles) permitted to reach this server at all?".
+    It gates MCP transport/handshake traffic (SSE open, `initialize`, `tools/list`)
+    so an *authorized* server's session can start (it has at least one allow rule on
+    that host) while an *unauthorized* one — no rule naming it — is blocked outright.
+    Per-tool control is the separate `check()` on `tools/call`.
+
+    Matching reuses the engine's own spec matcher (`_match_rule`), so roles, classes,
+    and wildcards stay identical to `check()` — no policy logic is duplicated here.
+    Iterates every Allow rule (no short-circuit), so a leading Never can't hide one."""
+    if not service:
+        return False
+    from datetime import datetime
+    from .helpers import _zpl_value, zpl_token
+    user = _ci_lower(zpl_token(user))
+    agent_id = _ci_lower(zpl_token(agent_id))
+    service = _ci_lower(zpl_token(service))
+    sattrs = {(lk := _ci_lower(zpl_token(k))): _fold_value(
+                  lk, [_zpl_value(x) for x in v] if isinstance(v, (list, tuple)) else _zpl_value(v))
+              for k, v in (subject_attrs or {}).items()}
+    subject = _resolve(crs, user, "users", sattrs)
+    accessor = _resolve(crs, agent_id, "endpoints", {}, exclude_subtree="servers")
+    server = _resolve(crs, service, "servers", {})
+    # Object/verb are ignored for reachability; placeholders keep _match_rule happy.
+    obj = Entity(class_name="services", name="*", attrs={"tool": "*"})
+    _now = datetime.now()
+    context = {"now": {"hour": _now.hour, "minute": _now.minute, "weekday": _now.weekday(),
+                       "day": _now.day, "month": _now.month, "year": _now.year}, "args": {}}
+    req = CheckRequest(subject=subject, object=obj, verb=VERB,
+                       accessor_endpoint=accessor, server_endpoint=server, context=context)
+    eng = crs.engine
+    for rule in eng.rules:
+        if rule.result != "allow":
+            continue
+        sm = eng._match_rule(rule, req).slot_matches
+        if (sm["subject"].matched and sm["accessor_endpoint"].matched
+                and sm["server_endpoint"].matched):
+            return True
+    return False

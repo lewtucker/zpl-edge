@@ -15,6 +15,7 @@ from .checker import (
     check,
     compile_rules,
     lint_rules,
+    service_reachable,
     verb_for_method,
 )
 from .helpers import _zpl_value, zpl_token
@@ -27,6 +28,7 @@ __all__ = [
     "check",
     "compile_rules",
     "lint_rules",
+    "service_reachable",
     "verb_for_method",
     "zpl_token",
     "_zpl_value",
