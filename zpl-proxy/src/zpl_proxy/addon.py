@@ -383,9 +383,12 @@ class ZplLogger:
             self._jsonl.write(record)   # forensic log (rotated; bodies only if capture_bodies)
         self._maybe_maintain()          # throttled: prune old aggregate buckets + disk check
 
-        # Phase 1b durable store: fold every HTTP request into the bucketed aggregate.
-        # This is what the hub pulls on demand (deduped, secret-scrubbed).
-        if self._agg is not None and request_type == "http":
+        # Phase 1b durable store: fold every request (HTTP *and* MCP) into the bucketed
+        # aggregate. This is what the hub pulls on demand (deduped, secret-scrubbed), so an
+        # MCP server an agent reaches (host + method + path, e.g. POST /messages) shows up on
+        # the HTTP guard too — not just in the raw forensic log. Tool-level detail stays the
+        # gateway's job; the aggregate is host/method/path only.
+        if self._agg is not None:
             try:
                 self._agg.record(
                     host=dest_host,

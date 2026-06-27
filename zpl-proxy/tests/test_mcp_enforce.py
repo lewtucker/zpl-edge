@@ -126,3 +126,24 @@ def test_responseheaders_leaves_json_buffered():
     f.response.stream = False
     log.responseheaders(f)
     assert f.response.stream is False and "streamed" not in f.metadata
+
+
+def test_record_aggregates_mcp_egress():
+    # An MCP POST to a server must now land in the egress aggregate (host/method/path),
+    # so it shows on the HTTP guard — not only in the raw forensic log.
+    log = _logger()
+    log._config.capture_bodies = False
+    log._jsonl = MagicMock()
+    log._agg = MagicMock()
+    log._maybe_maintain = MagicMock()
+    log._conn_agent = {"c1": {"agent": "Hermes", "subject": "kyle", "roles": []}}
+    f = _flow("mcp-defender.lewtucker.net", method="POST", path="/messages",
+              body=_tools_call("robot_health"))
+    f.client_conn.peername = ("127.0.0.1", 5000)
+    f.response = MagicMock(); f.response.status_code = 200
+    f.response.content = b""; f.response.headers = {}
+    log._record(f, 5)
+    assert log._agg.record.called
+    kw = log._agg.record.call_args.kwargs
+    assert kw["host"] == "mcp-defender.lewtucker.net"
+    assert kw["agent"] == "Hermes" and kw["subject"] == "kyle"
