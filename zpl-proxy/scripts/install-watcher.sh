@@ -27,6 +27,11 @@ LABEL="net.lewtucker.zpl-watcher"     # macOS launchd label / Linux systemd unit
 PYTHON="${PYTHON:-python3}"
 HUB_URL="${ZPL_HUB_URL:-}"
 GUARD_TOKEN="${ZPL_HUB_GUARD_TOKEN:-}"
+# Uninspectable channels to tunnel raw (ignore_hosts). Comma-separated. Telegram by
+# default — its bot long-poll carries the token and hangs under MITM. LLMs are NOT
+# bypassed here; they go in the lifelines ALLOW set so they stay inspected.
+IGNORE_HOSTS="${ZPL_IGNORE_HOSTS:-api.telegram.org}"
+IGNORE_HOSTS_SET=""
 
 usage() { sed -n '2,30p' "$0"; exit "${1:-0}"; }
 
@@ -37,6 +42,7 @@ while [ $# -gt 0 ]; do
     --guard-token)  GUARD_TOKEN="$2"; shift 2 ;;
     --port)         LISTEN_PORT="$2"; shift 2 ;;
     --listen-host)  LISTEN_HOST="$2"; shift 2 ;;
+    --ignore-hosts) IGNORE_HOSTS="$2"; IGNORE_HOSTS_SET=1; shift 2 ;;
     --repo-dir)     REPO_DIR="$2"; shift 2 ;;
     --git-url)      GIT_URL="$2"; shift 2 ;;
     --python)       PYTHON="$2"; shift 2 ;;
@@ -73,6 +79,30 @@ say "Python env + install"
 "$VENV/bin/pip" install -q -e "$PROXY_DIR"
 
 # ── 3. config (proxy.local.yaml overlays the base proxy.yaml; see config.py) ──
+# Ask which uninspectable channels to tunnel raw (only when interactive + not preset).
+if [ -z "$IGNORE_HOSTS_SET" ] && [ -t 0 ]; then
+  printf '\nUninspectable channels to tunnel raw past the watcher (comma-separated hosts).\n'
+  printf 'These bypass inspection — use only for token-bearing long-polls that hang under\n'
+  printf 'MITM (e.g. Telegram). Do NOT list LLM providers here (allow those instead).\n'
+  printf '  hosts [%s]: ' "$IGNORE_HOSTS"
+  read -r _ans || true
+  [ -n "${_ans:-}" ] && IGNORE_HOSTS="$_ans"
+fi
+# Build the ignore_hosts YAML block (escape dots → mitmproxy host regex). Empty → [].
+IGNORE_YAML="ignore_hosts: []"
+_lines=""
+_oldifs="$IFS"; IFS=','
+for _h in $IGNORE_HOSTS; do
+  _h="$(printf '%s' "$_h" | tr -d '[:space:]')"
+  [ -z "$_h" ] && continue
+  _esc="$(printf '%s' "$_h" | sed 's/[.]/\\./g')"
+  _lines="${_lines}  - '${_esc}'
+"
+done
+IFS="$_oldifs"
+[ -n "$_lines" ] && IGNORE_YAML="ignore_hosts:
+${_lines}"
+
 say "Config → $PROXY_DIR/config/proxy.local.yaml"
 mkdir -p "$PROXY_DIR/config" "$PROXY_DIR/data"
 umask 077
@@ -93,9 +123,10 @@ listen_port: $LISTEN_PORT
 # max_capture_mb: 500
 # capture_bodies: false
 
-# Long-poll / token-bearing hosts to tunnel raw (never intercept). Appends to base.
-ignore_hosts:
-  - 'api\.telegram\.org'
+# Uninspectable channels to tunnel raw (never intercept). Appends to base.
+# LLM providers are NOT here — those belong in the lifelines ALLOW rule set so they
+# stay inspected (see the "before you enforce" note printed at the end).
+$IGNORE_YAML
 EOF
 chmod 600 "$PROXY_DIR/config/proxy.local.yaml"
 umask 022
@@ -198,13 +229,21 @@ Point your agent at it (and trust the CA so HTTPS is intercepted):
   CA cert:  $CERT
   HTTP_PROXY=http://$LISTEN_HOST:$LISTEN_PORT
   HTTPS_PROXY=http://$LISTEN_HOST:$LISTEN_PORT
-  NO_PROXY=api.telegram.org,.telegram.org      # long-poll/token hosts to bypass
+  NO_PROXY=localhost,127.0.0.1,$IGNORE_HOSTS      # uninspectable hosts to bypass entirely
 
   Node agents (OpenClaw):   NODE_EXTRA_CA_CERTS=$CERT
   Python agents:            REQUESTS_CA_BUNDLE=$CERT   (also SSL_CERT_FILE=$CERT)
 
 The agent's runtime usually does NOT read the OS keychain — set the env var above
 for its language. Then restart the agent and confirm requests appear in the log.
+
+⚠ BEFORE YOU ENFORCE — don't lock the agent out of its own brain:
+The watcher governs the agent's OWN egress too (its LLM API calls, DNS). In enforce
+mode the engine is default-deny, so a guard with no allow rule for the agent's LLM
+provider will block the model calls and brick the agent. Bind a "lifelines" allow
+rule set FIRST — a starter (common LLM providers + DoH, allow + still inspected) is
+in the repo at docs/zpl-reference/lifelines-starter.zpl. Tailor it to the providers
+this agent uses, add your tool/MCP servers, then go flag → enforce.
 
 Enforcement: bind a rule set to this guard in the portal and set its mode to
 flag/enforce. The watcher swaps the bundle within ~5s — no restart needed.
