@@ -14,6 +14,7 @@ from mitmproxy.tools.main import mitmdump
 
 from zpl_proxy.config import ProxyConfig, load_config
 from zpl_proxy.identity import IdentityResolver, parse_basic_proxy_auth
+from zpl_proxy import jwt_verify
 from zpl_proxy.mcp import detect_mcp_frame, detect_mcp_response
 from zpl_engine import check as zpl_check, service_reachable, verb_for_method, zpl_token, VERB
 from zpl_proxy.storage.jsonl import JsonlWriter
@@ -180,13 +181,23 @@ class ZplLogger:
         )
 
     def _resolve_proxy_auth(self, header_value) -> dict | None:
-        """Map a Proxy-Authorization header to a per-agent identity via the bundle's
-        proxy_auth map ({token → {agent, subject, roles}}). The password is the lookup
-        key (a Defender-minted token); the username is a cosmetic agent label / fallback."""
+        """Map a Proxy-Authorization header to a per-agent identity. Precedence (P3):
+        a VERIFIED delegated JWT password wins (spoof-proof identity from its claims),
+        else the bundle's static proxy_auth map ({token → {agent, subject, roles}}). The
+        password is the credential; the username is a cosmetic agent label / fallback."""
         creds = parse_basic_proxy_auth(header_value)
         if not creds or not self._hub:
             return None
         user, token = creds
+        # P3: a delegated per-agent JWT verifies against the bundle's JWKS + audience — the
+        # data plane then trusts the token's claims, not the client-set username.
+        if jwt_verify.looks_like_jwt(token):
+            claims = jwt_verify.verify_delegated(token, self._hub.jwks, self._hub.audience)
+            if claims:
+                ident = jwt_verify.identity_from_claims(claims, hdr_agent=user)
+                return {"agent": ident["agent"], "subject": ident["subject"],
+                        "roles": ident["roles"] or []}
+            return None   # looks like a JWT but failed verification → reject (don't fall back)
         m = self._hub.proxy_auth or {}
         entry = m.get(token) or m.get(user)
         if not entry:

@@ -13,6 +13,7 @@ dependencies = [
     "requests-unixsocket2>=0.3",
     "pyyaml>=6.0",
     "structlog>=24.0",
+    "pyjwt[crypto]>=2.8",
     "zpl-engine",
 ]
 

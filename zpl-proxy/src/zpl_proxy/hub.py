@@ -54,6 +54,9 @@ class WatcherHub:
         self.mode: str = "monitor"
         self.subjects: dict = {}   # P1: {subject → [roles]} from the bundle (owner memberships)
         self.proxy_auth: dict = {}  # multi-agent: {token → {agent, subject, roles}} from the bundle
+        # P3: verify a delegated per-agent JWT presented as the proxy-auth password.
+        self.jwks: dict = {}        # verify-only JWK set from the bundle
+        self.audience: str = ""     # expected token `aud` (this guard's resource indicator)
         self._bundle_version: str | None = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="watcher-hub", daemon=True)
@@ -156,6 +159,8 @@ class WatcherHub:
         self.mode = mode
         self.subjects = b.get("subjects") or {}   # P1: refreshed with the rule set (folded into version)
         self.proxy_auth = b.get("proxy_auth") or {}  # multi-agent: token → {agent, subject, roles}
+        self.jwks = b.get("jwks") or {}           # P3: verify key for delegated JWT credentials
+        self.audience = b.get("audience") or ""   # P3: expected token aud
         self._bundle_version = version
         log.info("watcher_bundle_applied", version=version, mode=mode, rules=bool(crs))
 
